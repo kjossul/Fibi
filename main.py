@@ -161,7 +161,7 @@ async def remove_map(interaction: discord.Interaction, nome: str):
         files = results.get('files', [])
         
         if not files:
-            await interaction.followup.send(f"❌ La mappa con nome'{nome}' non esiste. Usa /lista per vedere quelle caricate a tuo nome.", ephemeral=True)
+            await interaction.followup.send(f"❌ La mappa '{nome}' non esiste. Usa /lista per vedere quelle che hai caricato.", ephemeral=True)
             return
         
         file_id = files[0]['id']
