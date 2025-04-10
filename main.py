@@ -5,12 +5,9 @@ from discord import app_commands
 from discord.ext import commands
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
-from googleapiclient.http import MediaFileUpload
-import tempfile
-from pathlib import Path
 import configparser
-import requests
 from googleapiclient.http import MediaIoBaseUpload
+from gbx import Gbx2020
 
 # Configuration
 dir_path = os.path.dirname(os.path.realpath(__file__))
@@ -21,6 +18,8 @@ DISCORD_TOKEN = config.get(configparser.UNNAMED_SECTION, 'discord')
 GOOGLE_DRIVE_ROOT_FOLDER_ID = config.get(configparser.UNNAMED_SECTION, 'drive_root_id')
 GOOGLE_SECRET = config.get(configparser.UNNAMED_SECTION, 'google')
 GOOGLE_CREDS_FILE = os.path.join(secrets, GOOGLE_SECRET)
+
+MAX_MAP_LENGTH = 60
 
 # Initialize Discord bot
 intents = discord.Intents.default()
@@ -79,24 +78,16 @@ async def on_ready():
     except Exception as e:
         print(e)
 
-@bot.tree.command(name="submit", description="Submit a map for consideration")
+@bot.tree.command(name="invia", description="Invia la tua mappa")
 @app_commands.describe(
-    map_file="The map file (.Map.Gbx)",
-    length="Map length in seconds",
-    tags="Comma-separated tags for the map",
-    description="Optional description of the map"
+    file="La tua mappa",
+    descrizione="[Opzionale] Breve descrizione della tua mappa"
 )
 async def submit(interaction: discord.Interaction, 
-                map_file: discord.Attachment, 
-                length: int, 
-                tags: str, 
-                description: str = None):
-    if not map_file.filename.lower().endswith('.map.gbx'):
-        await interaction.response.send_message("Error: File must have .Map.Gbx extension.", ephemeral=True)
-        return
-    
-    if length <= 0:
-        await interaction.response.send_message("Error: Length must be a positive number.", ephemeral=True)
+                file: discord.Attachment, 
+                descrizione: str = None):
+    if not file.filename.lower().endswith('.map.gbx'):
+        await interaction.response.send_message("Errore: Il file deve avere estensione .Map.Gbx.", ephemeral=True)
         return
     
     await interaction.response.defer(ephemeral=True)
@@ -104,34 +95,42 @@ async def submit(interaction: discord.Interaction,
     try:
         user_folder_id = get_user_folder_id(interaction.user.name)
         
-        if file_exists_in_folder(user_folder_id, map_file.filename):
-            await interaction.followup.send(f"❌ A file with name '{map_file.filename}' already exists in your folder. Please rename your file and try again.", ephemeral=True)
+        if file_exists_in_folder(user_folder_id, file.filename):
+            await interaction.followup.send(f"❌ La mappa '{file.filename}' esiste già tra i tuoi caricamenti. Rinomina il file, o rimuovi quello vecchio con /rimuovi.", ephemeral=True)
             return
         
+        file_content = await file.read()
+        gbx = Gbx2020(io.BytesIO(file_content))
+        at = gbx.get_at_seconds()
+        if at < 0:
+            await interaction.followup.send(f"❌ Il file della mappa non è valido.", ephemeral=True)
+            return
+        elif at > MAX_MAP_LENGTH:
+            await interaction.followup.send(f"❌ Mappa troppo lunga (max {MAX_MAP_LENGTH} secondi).", ephemeral=True)
+            return
+
+
         # File metadata with custom properties
         file_metadata = {
-            'name': map_file.filename,
+            'name': file.filename,
             'parents': [user_folder_id],
             'properties': {
-                'length': str(length),
-                'tags': tags,
-                'description': description if description else '',
+                'length': at,
+                'descrizione': descrizione if descrizione else '',
                 'discord_user_id': str(interaction.user.id),
                 'discord_username': interaction.user.name
             }
         }
-
-        file_content = await map_file.read() 
         file_stream = io.BytesIO(file_content)
         media = MediaIoBaseUpload(file_stream, mimetype='application/octet-stream', resumable=True)
         drive_service.files().create(body=file_metadata, media_body=media).execute()
 
-        await interaction.followup.send(f"✅ Your map '{map_file.filename}' has been successfully submitted!", ephemeral=True)
+        await interaction.followup.send(f"✅ La mappa '{file.filename}' è stata caricata con successo!", ephemeral=True)
     except Exception as e:
-        await interaction.followup.send(f"❌ An error occurred: {str(e)}", ephemeral=True)
+        await interaction.followup.send(f"❌ Errore: {str(e)}.", ephemeral=True)
         print(f"Error processing submission: {e}")
 
-@bot.tree.command(name="list", description="List all your submitted maps")
+@bot.tree.command(name="lista", description="Lista delle tue mappe caricate.")
 async def list_maps(interaction: discord.Interaction):    
     await interaction.response.defer(ephemeral=True)
     
@@ -142,25 +141,22 @@ async def list_maps(interaction: discord.Interaction):
         files = results.get('files', [])
         
         if not files:
-            await interaction.followup.send("You haven't submitted any maps yet.", ephemeral=True)
+            await interaction.followup.send("Nessuna mappa caricata a tuo nome in coda.", ephemeral=True)
             return
         
-        response = "**Your submitted maps:**\n"
+        response = "**Le tue mappe:**\n"
         for file in files:
             props = file.get('properties', {})
-            response += f"- **{file['name']}**\n"
-            response += f"  Length: {props.get('length', 'N/A')}s\n"
-            response += f"  Tags: {props.get('tags', 'None')}\n"
-            if props.get('description'):
-                response += f"  Description: {props['description']}\n"
-            response += "\n"
+            response += f"- **{file['name'][:-8]}**\n"
+            response += f"  Lunghezza: {props.get('length', 'N/A')}s\n"
+            response += f"  Descrizione: {props.get('descrizione', '')}\n\n"
         
         await interaction.followup.send(response, ephemeral=True)
     except Exception as e:
-        await interaction.followup.send(f"❌ An error occurred: {str(e)}", ephemeral=True)
+        await interaction.followup.send(f"❌ Errore {str(e)}", ephemeral=True)
         print(f"Error listing maps: {e}")
 
-@bot.tree.command(name="remove", description="Remove one of your submitted maps")
+@bot.tree.command(name="rimuovi", description="Rimuovi una delle tue mappe")
 @app_commands.describe(
     map_name="Name of the map to remove"
 )
@@ -169,19 +165,19 @@ async def remove_map(interaction: discord.Interaction, map_name: str):
     
     try:
         user_folder_id = get_user_folder_id(interaction.user.name)
-        query = f"'{user_folder_id}' in parents and name='{map_name}'"
+        query = f"'{user_folder_id}' in parents and name='{map_name}.Map.Gbx'"
         results = drive_service.files().list(q=query, fields="files(id)").execute()
         files = results.get('files', [])
         
         if not files:
-            await interaction.followup.send(f"❌ No map named '{map_name}' found in your submissions.", ephemeral=True)
+            await interaction.followup.send(f"❌ La mappa con nome'{map_name}' non esiste. Usa /lista per vedere quelle caricate a tuo nome.", ephemeral=True)
             return
         
         file_id = files[0]['id']
         drive_service.files().delete(fileId=file_id).execute()
-        await interaction.followup.send(f"✅ Map '{map_name}' has been successfully removed.", ephemeral=True)
+        await interaction.followup.send(f"✅ La mappa '{map_name}' è stata rimossa con successo.", ephemeral=True)
     except Exception as e:
-        await interaction.followup.send(f"❌ An error occurred: {str(e)}", ephemeral=True)
+        await interaction.followup.send(f"❌ Errore: {str(e)}", ephemeral=True)
         print(f"Error removing map: {e}")
 
 bot.run(DISCORD_TOKEN)
