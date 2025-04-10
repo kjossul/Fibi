@@ -15,10 +15,10 @@ secrets = os.path.join(dir_path, "secrets")
 config = configparser.ConfigParser(allow_unnamed_section=True)
 config.read(os.path.join(secrets, "secrets.ini"))
 DISCORD_TOKEN = config.get(configparser.UNNAMED_SECTION, 'discord')
-GOOGLE_DRIVE_ROOT_FOLDER_ID = config.get(configparser.UNNAMED_SECTION, 'drive_root_id')
+GOOGLE_DRIVE_TMITA_FOLDER_ID = config.get(configparser.UNNAMED_SECTION, 'drive_folder_id')
 GOOGLE_SECRET = config.get(configparser.UNNAMED_SECTION, 'google')
 GOOGLE_CREDS_FILE = os.path.join(secrets, GOOGLE_SECRET)
-
+MIN_MAP_LENGTH = 15
 MAX_MAP_LENGTH = 60
 
 # Initialize Discord bot
@@ -34,21 +34,8 @@ creds = service_account.Credentials.from_service_account_file(
 drive_service = build('drive', 'v3', credentials=creds)
 
 def get_user_folder_id(user_name):
-    """Get or create user-specific folder in Google Drive"""
-    query = f"'{GOOGLE_DRIVE_ROOT_FOLDER_ID}' in parents and name='TMITA' and mimeType='application/vnd.google-apps.folder'"
-    result = drive_service.files().list(q=query, fields="files(id)").execute()
-    tmita_folder_id = result['files'][0]['id'] if result['files'] else None
-    
-    if not tmita_folder_id:
-        file_metadata = {
-            'name': 'TMITA',
-            'mimeType': 'application/vnd.google-apps.folder',
-            'parents': [GOOGLE_DRIVE_ROOT_FOLDER_ID]
-        }
-        tmita_folder = drive_service.files().create(body=file_metadata, fields='id').execute()
-        tmita_folder_id = tmita_folder['id']
-    
-    query = f"'{tmita_folder_id}' in parents and name='{user_name}' and mimeType='application/vnd.google-apps.folder'"
+    """Get or create user-specific folder in Google Drive"""   
+    query = f"'{GOOGLE_DRIVE_TMITA_FOLDER_ID}' in parents and name='{user_name}' and mimeType='application/vnd.google-apps.folder'"
     result = drive_service.files().list(q=query, fields="files(id)").execute()
     user_folder_id = result['files'][0]['id'] if result['files'] else None
     
@@ -56,7 +43,7 @@ def get_user_folder_id(user_name):
         file_metadata = {
             'name': user_name,
             'mimeType': 'application/vnd.google-apps.folder',
-            'parents': [tmita_folder_id]
+            'parents': [GOOGLE_DRIVE_TMITA_FOLDER_ID]
         }
         user_folder = drive_service.files().create(body=file_metadata, fields='id').execute()
         user_folder_id = user_folder['id']
@@ -87,28 +74,29 @@ async def submit(interaction: discord.Interaction,
                 file: discord.Attachment, 
                 descrizione: str = None):
     if not file.filename.lower().endswith('.map.gbx'):
-        await interaction.response.send_message("Errore: Il file deve avere estensione .Map.Gbx.", ephemeral=True)
+        await interaction.response.send_message("❌ Errore: Il file deve avere estensione .Map.Gbx.", ephemeral=True)
         return
     
     await interaction.response.defer(ephemeral=True)
     
-    try:
-        user_folder_id = get_user_folder_id(interaction.user.name)
-        
-        if file_exists_in_folder(user_folder_id, file.filename):
-            await interaction.followup.send(f"❌ La mappa '{file.filename}' esiste già tra i tuoi caricamenti. Rinomina il file, o rimuovi quello vecchio con /rimuovi.", ephemeral=True)
-            return
-        
+    try:        
         file_content = await file.read()
         gbx = Gbx2020(io.BytesIO(file_content))
         at = gbx.get_at_seconds()
         if at < 0:
             await interaction.followup.send(f"❌ Il file della mappa non è valido.", ephemeral=True)
             return
+        elif at < MIN_MAP_LENGTH:
+            await interaction.followup.send(f"❌ Mappa troppo corta (min {MIN_MAP_LENGTH} secondi).", ephemeral=True)
+            return
         elif at > MAX_MAP_LENGTH:
             await interaction.followup.send(f"❌ Mappa troppo lunga (max {MAX_MAP_LENGTH} secondi).", ephemeral=True)
             return
 
+        user_folder_id = get_user_folder_id(interaction.user.name)
+        if file_exists_in_folder(user_folder_id, file.filename):
+            await interaction.followup.send(f"❌ La mappa '{file.filename}' esiste già tra i tuoi caricamenti. Rinomina il file, o rimuovi quello vecchio con /rimuovi.", ephemeral=True)
+            return
 
         # File metadata with custom properties
         file_metadata = {
@@ -149,7 +137,10 @@ async def list_maps(interaction: discord.Interaction):
             props = file.get('properties', {})
             response += f"- **{file['name'][:-8]}**\n"
             response += f"  Lunghezza: {props.get('length', 'N/A')}s\n"
-            response += f"  Descrizione: {props.get('descrizione', '')}\n\n"
+            desc = props.get('descrizione')
+            if desc:
+                response += f"  Descrizione: {desc}\n"
+            response += '\n'
         
         await interaction.followup.send(response, ephemeral=True)
     except Exception as e:
@@ -158,24 +149,24 @@ async def list_maps(interaction: discord.Interaction):
 
 @bot.tree.command(name="rimuovi", description="Rimuovi una delle tue mappe")
 @app_commands.describe(
-    map_name="Name of the map to remove"
+    nome="Nome della mappa da rimuovere"
 )
-async def remove_map(interaction: discord.Interaction, map_name: str):    
+async def remove_map(interaction: discord.Interaction, nome: str):    
     await interaction.response.defer(ephemeral=True)
     
     try:
         user_folder_id = get_user_folder_id(interaction.user.name)
-        query = f"'{user_folder_id}' in parents and name='{map_name}.Map.Gbx'"
+        query = f"'{user_folder_id}' in parents and name='{nome}.Map.Gbx'"
         results = drive_service.files().list(q=query, fields="files(id)").execute()
         files = results.get('files', [])
         
         if not files:
-            await interaction.followup.send(f"❌ La mappa con nome'{map_name}' non esiste. Usa /lista per vedere quelle caricate a tuo nome.", ephemeral=True)
+            await interaction.followup.send(f"❌ La mappa con nome'{nome}' non esiste. Usa /lista per vedere quelle caricate a tuo nome.", ephemeral=True)
             return
         
         file_id = files[0]['id']
         drive_service.files().delete(fileId=file_id).execute()
-        await interaction.followup.send(f"✅ La mappa '{map_name}' è stata rimossa con successo.", ephemeral=True)
+        await interaction.followup.send(f"✅ La mappa '{nome}' è stata rimossa con successo.", ephemeral=True)
     except Exception as e:
         await interaction.followup.send(f"❌ Errore: {str(e)}", ephemeral=True)
         print(f"Error removing map: {e}")
