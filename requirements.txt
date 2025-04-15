@@ -1,5 +1,5 @@
 discord.py
-google-api-python-client
-google-auth-httplib2
-google-auth-oauthlib
+google-api-core
+gspread
+oauth2client
 pygbx

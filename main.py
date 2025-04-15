@@ -1,22 +1,26 @@
+from datetime import datetime
 import io
+import logging
 import os
+import configparser
+import threading
 import discord
 from discord import app_commands
 from discord.ext import commands
-from google.oauth2 import service_account
-from googleapiclient.discovery import build
-import configparser
-from googleapiclient.http import MediaIoBaseUpload
+import gspread
+from oauth2client.service_account import ServiceAccountCredentials
 from gbx import Gbx2020
+from google.api_core import retry
 
 # Configuration
+logging.basicConfig(level=logging.CRITICAL)
 dir_path = os.path.dirname(os.path.realpath(__file__))
 secrets = os.path.join(dir_path, "secrets")
 config = configparser.ConfigParser(allow_unnamed_section=True)
 config.read(os.path.join(secrets, "secrets.ini"))
 DISCORD_TOKEN = config.get(configparser.UNNAMED_SECTION, 'discord')
-GOOGLE_DRIVE_TMITA_FOLDER_ID = config.get(configparser.UNNAMED_SECTION, 'drive_folder_id')
 GOOGLE_SECRET = config.get(configparser.UNNAMED_SECTION, 'google')
+GOOGLE_SHEET_ID = config.get(configparser.UNNAMED_SECTION, 'sheet_id')
 GOOGLE_CREDS_FILE = os.path.join(secrets, GOOGLE_SECRET)
 MIN_MAP_LENGTH = 15
 MAX_MAP_LENGTH = 60
@@ -24,46 +28,42 @@ MAX_MAP_LENGTH = 60
 # Initialize Discord bot
 intents = discord.Intents.default()
 intents.message_content = True
-
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 # Initialize Google Drive service
-SCOPES = ['https://www.googleapis.com/auth/drive']
-creds = service_account.Credentials.from_service_account_file(
-    GOOGLE_CREDS_FILE, scopes=SCOPES)
-drive_service = build('drive', 'v3', credentials=creds)
+SCOPES = ['https://www.googleapis.com/auth/spreadsheets']
+creds = ServiceAccountCredentials.from_json_keyfile_name(GOOGLE_CREDS_FILE, SCOPES)
+gc = gspread.authorize(creds)
+sheet = gc.open_by_key(GOOGLE_SHEET_ID).worksheet("Uploads")
+sheet_lock = threading.Lock()
 
-def get_user_folder_id(user_name):
-    """Get or create user-specific folder in Google Drive"""   
-    query = f"'{GOOGLE_DRIVE_TMITA_FOLDER_ID}' in parents and name='{user_name}' and mimeType='application/vnd.google-apps.folder'"
-    result = drive_service.files().list(q=query, fields="files(id)").execute()
-    user_folder_id = result['files'][0]['id'] if result['files'] else None
-    
-    if not user_folder_id:
-        file_metadata = {
-            'name': user_name,
-            'mimeType': 'application/vnd.google-apps.folder',
-            'parents': [GOOGLE_DRIVE_TMITA_FOLDER_ID]
-        }
-        user_folder = drive_service.files().create(body=file_metadata, fields='id').execute()
-        user_folder_id = user_folder['id']
-    
-    return user_folder_id
+@retry.Retry()
+def add_sheet_row(row):
+    with sheet_lock:
+        sheet.append_row(row, value_input_option='USER_ENTERED')
 
-def file_exists_in_folder(folder_id, file_name):
-    """Check if a file already exists in the specified folder"""
-    query = f"'{folder_id}' in parents and name='{file_name}'"
-    result = drive_service.files().list(q=query, fields="files(id)").execute()
-    return len(result['files']) > 0
+@retry.Retry()
+def find_map_row(username, map_uid=None, map_name=None):
+    with sheet_lock:
+        records = sheet.get_all_records()
+        for i, row in enumerate(records, start=2):  # Rows start at 2 (1=header)
+            if row['User'] == username and (row['Map Name'] == map_name or row['UID'] == map_uid):
+                return i
+        return None
+
+@retry.Retry()
+def delete_sheet_row(row_num):
+    with sheet_lock:
+        sheet.delete_rows(row_num)
 
 @bot.event
 async def on_ready():
     print(f'Logged in as {bot.user.name}')
     try:
         synced = await bot.tree.sync()
-        print(f"Synced {len(synced)} commands")
+        logging.info(f"Synced {len(synced)} commands")
     except Exception as e:
-        print(e)
+        logging.error(e)
 
 @bot.tree.command(name="invia", description="Invia la tua mappa")
 @app_commands.describe(
@@ -81,6 +81,7 @@ async def submit(interaction: discord.Interaction,
     
     try:        
         file_content = await file.read()
+        filename = file.filename[:-8]
         gbx = Gbx2020(io.BytesIO(file_content))
         at = gbx.get_at_seconds()
         if at < 0:
@@ -92,60 +93,46 @@ async def submit(interaction: discord.Interaction,
         elif at > MAX_MAP_LENGTH:
             await interaction.followup.send(f"❌ Mappa troppo lunga (max {MAX_MAP_LENGTH} secondi).", ephemeral=True)
             return
-
-        user_folder_id = get_user_folder_id(interaction.user.name)
-        if file_exists_in_folder(user_folder_id, file.filename):
-            await interaction.followup.send(f"❌ La mappa '{file.filename}' esiste già tra i tuoi caricamenti. Rinomina il file, o rimuovi quello vecchio con /rimuovi.", ephemeral=True)
+        elif not gbx.get_map_uid():
+            await interaction.followup.send(f"❌ Map UID non trovato, assicurati di averla caricata online sui servizi Nadeo.", ephemeral=True)
             return
-
-        # File metadata with custom properties
-        file_metadata = {
-            'name': file.filename,
-            'parents': [user_folder_id],
-            'properties': {
-                'length': at,
-                'descrizione': descrizione if descrizione else '',
-                'discord_user_id': str(interaction.user.id),
-                'discord_username': interaction.user.name
-            }
-        }
-        file_stream = io.BytesIO(file_content)
-        media = MediaIoBaseUpload(file_stream, mimetype='application/octet-stream', resumable=True)
-        drive_service.files().create(body=file_metadata, media_body=media).execute()
-
-        await interaction.followup.send(f"✅ La mappa '{file.filename}' è stata caricata con successo!", ephemeral=True)
+        elif find_map_row(interaction.user.name, map_uid=gbx.get_map_uid()):
+            await interaction.followup.send(f"❌ La mappa '{filename}' esiste già tra i tuoi caricamenti. Rinomina il file, o rimuovi quello vecchio con /rimuovi.", ephemeral=True)
+            return
+        row = [
+            interaction.user.name,
+            gbx.get_map_author_login(),
+            filename,
+            str(gbx.get_at_seconds()),
+            descrizione or "",
+            datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            gbx.get_map_uid(),
+            f'=HYPERLINK("https://trackmania.io/#/leaderboard/{gbx.get_map_uid()}", "Download")',
+            "CARICATA"
+        ]
+        add_sheet_row(row)
+        await interaction.followup.send(f"✅ La mappa '{filename}' è stata aggiunta con successo!", ephemeral=True)
     except Exception as e:
-        await interaction.followup.send(f"❌ Errore: {str(e)}.", ephemeral=True)
-        print(f"Error processing submission: {e}")
+        await interaction.followup.send(f"❌ Errore nel caricamento della mappa.", ephemeral=True)
+        logging.error(f"Error processing submission: {e}")
 
-@bot.tree.command(name="lista", description="Lista delle tue mappe caricate.")
+@bot.tree.command(name="lista", description="Lista delle tue mappe caricate")
 async def list_maps(interaction: discord.Interaction):    
     await interaction.response.defer(ephemeral=True)
-    
-    try:
-        user_folder_id = get_user_folder_id(interaction.user.name)
-        query = f"'{user_folder_id}' in parents"
-        results = drive_service.files().list(q=query, fields="files(name,properties)").execute()
-        files = results.get('files', [])
-        
-        if not files:
-            await interaction.followup.send("Nessuna mappa caricata a tuo nome in coda.", ephemeral=True)
-            return
-        
-        response = "**Le tue mappe:**\n"
-        for file in files:
-            props = file.get('properties', {})
-            response += f"- **{file['name'][:-8]}**\n"
-            response += f"  Lunghezza: {props.get('length', 'N/A')}s\n"
-            desc = props.get('descrizione')
-            if desc:
-                response += f"  Descrizione: {desc}\n"
-            response += '\n'
-        
-        await interaction.followup.send(response, ephemeral=True)
-    except Exception as e:
-        await interaction.followup.send(f"❌ Errore {str(e)}", ephemeral=True)
-        print(f"Error listing maps: {e}")
+
+    username = interaction.user.name
+    with sheet_lock:
+        records = sheet.get_all_records()
+    user_maps = [row for row in records if row['User'] == username]
+    if not user_maps:
+        await interaction.followup.send("Nessuna mappa caricata a tuo nome in coda.", ephemeral=True)
+        return
+    maplist = "\n".join(
+        f"• **{row['Map Name']}** | AT: {row['AT']}s | " + (f"Desc: {row['Description']} | " if row['Description'] else '') + f"Status: {row['Status']}"
+        for row in user_maps
+    )
+    response = f"**Le tue mappe:**\n{maplist}"
+    await interaction.followup.send(response, ephemeral=True)
 
 @bot.tree.command(name="rimuovi", description="Rimuovi una delle tue mappe")
 @app_commands.describe(
@@ -153,22 +140,17 @@ async def list_maps(interaction: discord.Interaction):
 )
 async def remove_map(interaction: discord.Interaction, nome: str):    
     await interaction.response.defer(ephemeral=True)
+    username = interaction.user.name
+    row_num = find_map_row(username, map_name=nome)
     
+    if not row_num:
+        await interaction.followup.send(f"❌ La mappa '{nome}' non esiste. Usa /lista per vedere quelle che hai caricato.", ephemeral=True)
+        return
     try:
-        user_folder_id = get_user_folder_id(interaction.user.name)
-        query = f"'{user_folder_id}' in parents and name='{nome}.Map.Gbx'"
-        results = drive_service.files().list(q=query, fields="files(id)").execute()
-        files = results.get('files', [])
-        
-        if not files:
-            await interaction.followup.send(f"❌ La mappa '{nome}' non esiste. Usa /lista per vedere quelle che hai caricato.", ephemeral=True)
-            return
-        
-        file_id = files[0]['id']
-        drive_service.files().delete(fileId=file_id).execute()
+        delete_sheet_row(row_num)
         await interaction.followup.send(f"✅ La mappa '{nome}' è stata rimossa con successo.", ephemeral=True)
     except Exception as e:
-        await interaction.followup.send(f"❌ Errore: {str(e)}", ephemeral=True)
-        print(f"Error removing map: {e}")
+        await interaction.followup.send(f"❌ Errore nella rimozione della mappa.", ephemeral=True)
+        logging.error(f"Error removing map: {e}")
 
 bot.run(DISCORD_TOKEN)
