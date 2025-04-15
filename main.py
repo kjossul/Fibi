@@ -94,7 +94,7 @@ async def submit(interaction: discord.Interaction,
             await interaction.followup.send(f"❌ Mappa troppo lunga (max {MAX_MAP_LENGTH} secondi).", ephemeral=True)
             return
         elif not gbx.get_map_uid():
-            await interaction.followup.send(f"❌ Map UID non trovato, assicurati di averla caricata online sui servizi Nadeo.", ephemeral=True)
+            await interaction.followup.send(f"❌ Map UID non trovato, assicurati di aver fatto validation e shadows calculation.", ephemeral=True)
             return
         elif find_map_row(interaction.user.name, map_uid=gbx.get_map_uid()):
             await interaction.followup.send(f"❌ La mappa '{filename}' esiste già tra i tuoi caricamenti. Rinomina il file, o rimuovi quello vecchio con /rimuovi.", ephemeral=True)
@@ -107,11 +107,11 @@ async def submit(interaction: discord.Interaction,
             descrizione or "",
             datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             gbx.get_map_uid(),
-            f'=HYPERLINK("https://trackmania.io/#/leaderboard/{gbx.get_map_uid()}", "Download")',
+            f'=HYPERLINK("https://trackmania.io/#/leaderboard/{gbx.get_map_uid()}", "Link")',
             "CARICATA"
         ]
         add_sheet_row(row)
-        await interaction.followup.send(f"✅ La mappa '{filename}' è stata aggiunta con successo!", ephemeral=True)
+        await interaction.followup.send(f"✅ La mappa '{filename}' è stata aggiunta con successo! Ricorda di caricarla sui servizi Nadeo.", ephemeral=True)
     except Exception as e:
         await interaction.followup.send(f"❌ Errore nel caricamento della mappa.", ephemeral=True)
         logging.error(f"Error processing submission: {e}")
