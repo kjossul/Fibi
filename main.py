@@ -97,7 +97,7 @@ async def submit(interaction: discord.Interaction,
             await interaction.followup.send(f"❌ Map UID non trovato, assicurati di aver fatto validation e shadows calculation.", ephemeral=True)
             return
         elif find_map_row(interaction.user.name, map_uid=gbx.get_map_uid()):
-            await interaction.followup.send(f"❌ La mappa '{filename}' esiste già tra i tuoi caricamenti. Rinomina il file, o rimuovi quello vecchio con /rimuovi.", ephemeral=True)
+            await interaction.followup.send(f"❌ La mappa '{filename}' esiste già tra i tuoi caricamenti. Usa /lista per vedere le mappe che hai caricato.", ephemeral=True)
             return
         row = [
             interaction.user.name,
