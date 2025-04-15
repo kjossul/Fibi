@@ -67,12 +67,10 @@ async def on_ready():
 
 @bot.tree.command(name="invia", description="Invia la tua mappa")
 @app_commands.describe(
-    file="La tua mappa",
-    descrizione="[Opzionale] Breve descrizione della tua mappa"
+    file="La tua mappa"
 )
 async def submit(interaction: discord.Interaction, 
-                file: discord.Attachment, 
-                descrizione: str = None):
+                file: discord.Attachment):
     if not file.filename.lower().endswith('.map.gbx'):
         await interaction.response.send_message("❌ Errore: Il file deve avere estensione .Map.Gbx.", ephemeral=True)
         return
@@ -104,7 +102,6 @@ async def submit(interaction: discord.Interaction,
             gbx.get_map_author_login(),
             filename,
             str(gbx.get_at_seconds()),
-            descrizione or "",
             datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             gbx.get_map_uid(),
             f'=HYPERLINK("https://trackmania.io/#/leaderboard/{gbx.get_map_uid()}", "Link")',
@@ -128,7 +125,7 @@ async def list_maps(interaction: discord.Interaction):
         await interaction.followup.send("Nessuna mappa caricata a tuo nome in coda.", ephemeral=True)
         return
     maplist = "\n".join(
-        f"• **{row['Map Name']}** | AT: {row['AT']}s | " + (f"Desc: {row['Description']} | " if row['Description'] else '') + f"Status: {row['Status']}"
+        f"• **{row['Map Name']}** | AT: {row['AT']}s | Status: {row['Status']}"
         for row in user_maps
     )
     response = f"**Le tue mappe:**\n{maplist}"
